@@ -6,17 +6,15 @@ import json
 import time
 from matplotlib import pyplot as pt
 import re
+import sys
 
-class virtualShell:
+class TelShell:
     """
-    init telnet
+    A telnet control class. intend to run shell cmd through network
     """
-    def __init__(self, host, username, port = 0, password = ""):
+    def __init__(self, host, username = "root", password = ""):
         tel = telnetlib.Telnet()
-        if port > 0:
-            tel.open(host, port)
-        else:
-            tel.open(host)
+        tel.open(host)
         buf = tel.read_until("login: ", 10)
         if buf.find("login") < 0:
             raise Exception("read for login timeout " + buf)
@@ -40,10 +38,10 @@ class virtualShell:
         tel.write(cmd + "\n")
         buf = tel.read_until("\n#", self.timeout)
         if buf.find("#") < 0:
-            return (-1, buf)
+            raise Exception("telnet cmd error {}".format(buf))
         ret_str = buf.rstrip('\r\n#')
         ret_str = ret_str[ret_str.find('\r\n') + 2:]
-        return (0, ret_str)
+        return ret_str
 
     def set_timeout(self, timeout):
         self.timeout = timeout
@@ -54,39 +52,11 @@ class virtualShell:
         tel.close()
 
 
-class testManager:
-    def __init__(self, host, port = "43794", profile = "profile1"):
+class CgiManager:
+    def __init__(self, host, username = "Admin", password = "123456"):
         self.host = host
-        self.rtsp_port = port
-        self.profile = profile
-        self.username = "admin"
-        self.password = "123456"
-        self.rtsp_host = "rtsp://" + host + ":" + port + '/' + profile
-        self.shell = virtualShell(host, "root")
-        self.clients = []
-
-    def get_running_clients_count(self):
-        count = 0
-        for c in self.clients:
-            if c.poll() != None:
-                print "a client exit ", c.wait()
-                self.client.remove(c)
-            else:
-                count += 1
-        return count
-
-    def setup_n_clients(self, num):
-        count = self.get_running_clients_count()
-        while count != num:
-            if count < num:
-                for i in xrange(count + 1, num + 1):
-                    self.clients.append(sb.Popen(["saber", "rtp", "-p", self.rtsp_host]))
-            if count > num:
-                for i in xrange(num + 1, count + 1):
-                    self.clients[-1].terminate()
-                    print "force exit client ", self.clients[-1].wait()
-                    self.clients.pop()
-            count = self.get_running_clients_count()
+        self.username = username
+        self.password = password
 
     def set_cgi_attr(self, cgi_uri, attr):
         """
@@ -103,8 +73,8 @@ class testManager:
         else:
             return 0
 
-    def __set_stream_attr(self, attr):
-        r = self.set_cgi_attr("/cgi-bin/stream.cgi", {"command":"setParam", "stream":self.profile, "data": attr})
+    def __set_stream_attr(self, attr, profile = "profile1"):
+        r = self.set_cgi_attr("/cgi-bin/stream.cgi", {"command":"setParam", "stream":profile, "data": attr})
         if r != 0:
             raise Exception("set stream attribute err")
         time.sleep(2)
@@ -118,171 +88,185 @@ class testManager:
     def set_framerate(self, fps=25):
         self.__set_stream_attr({"fps": fps})
 
-    def board_run_cmd(self, cmd):
-        return self.shell.cmd(cmd)[-1]
+
+
+class SaberManager:
+    def __init__(self, rtspurl):
+        self.url = rtspurl
+        self.clients = []
+
+    def get_running_clients_num(self):
+        count = 0
+        for c in self.clients:
+            if c.poll() != None:
+                print "A client exit ", c.wait()
+                self.client.remove(c)
+            else:
+                count += 1
+        return count
+
+    def setup_n_clients(self, num):
+        count = self.get_running_clients_num()
+        while count != num:
+            if count < num:
+                for i in xrange(count + 1, num + 1):
+                    self.clients.append(sb.Popen(["saber", "rtp", "-p", self.url]))
+            if count > num:
+                for i in xrange(num + 1, count + 1):
+                    self.clients[-1].terminate()
+                    print "force exit client ", self.clients[-1].wait()
+                    self.clients.pop()
+            count = self.get_running_clients_num()
+
+    def run_nclients_nsec(self, clients_num, nsecs):
+        self.setup_n_clients(clients_num - 1)
+        return sb.Popen(["saber", "rtp", "-p", "-d", "{}".format(nsecs), self.url], stdout=sb.PIPE)
 
     def __del__(self):
         for c in self.clients:
             c.kill()
             c.wait()
 
-    def set_username_password(self, username, password):
-        self.username = username
-        self.password = password
 
-
-class nClientsBitrateTest(testManager):
-    """
-    Test maxto s_clients_num rtsp_clients, using bitrate s_bitrate
-    it is a TODO: how to permit situation that board oom-killer.
-    that will case the test dead
-    """
-    s_bitrate = map(lambda x: 1024*1024*x, [2, 4, 8])
-    s_clients_num = 16
-
-    def __init__(self, *args):
-        testManager.__init__(self, *args)
-
-    def set_testcase(self, bitrates, clients_num_array):
-        if len(bitrates) != len(clients_num_array):
-            raise Exception("testcase unmatch")
-        nClientsBitrateTest.s_bitrate = bitrates
-        nClientsBitrateTest.s_clients_num = clients_num_array
-
-    def __test(self):
-        # t = sb.Popen("saber -S rtsp://10.0.2.111:43794/profile1 ", shell = True)
-        t = sb.Popen(["saber", "rtp", "-p", "-d", "30", self.rtsp_host], stdout=sb.PIPE)
-        ret_string = self.board_run_cmd("top -b -n 3")
-        tt = 0
-        end = 0
-        while tt < 30 and not end:
-            if t.poll() == None:
-                time.sleep(5)
-                tt += 5
-            else:
-                t.wait()
-                end = 1
-        if not end:
-            t.kill()
-            t.wait()
-            raise Exception("subprocess not responsing, maybe board is die")
-        if t.poll() != 0:
-            raise Exception("performance test err %d"% (t.poll()))
-        ret_overflow = self.board_run_cmd("cat /sys/devices/platform/ocp/18040000.rts_soc_camera/streaminfo")
-        return (t.stdout.read(), ret_string, ret_overflow)
-
-    def run(self):
+class Tester:
+    def __init__(self, rtspurl, **args):
         """
-        this is a generator of testing log
-        output : (top log, saber log)
+        args:
+            rtspurl: rtsp addr for rtspclient
+            cgi_user:
+            cgi_password:
+            telnet_user:
+            telnet_password:
         """
-        for bitrate in nClientsBitrateTest.s_bitrate:
-            self.m_bitrate = bitrate
-            self.set_bitrate(bitrate)
-            self.end_loop = 0
-            for i in xrange(1, self.s_clients_num + 1):
-                if self.end_loop:
-                    break
-                self.setup_n_clients(i - 1)
-                self.m_testcount = i
-                yield self.__test()
-            self.setup_n_clients(0)
+        self.rtspurl = url
+        self.host, self.port, self.profile = self.parse_url(rtspurl)
+        self.cgi_auth = ["Admin", "123456"]
+        self.telnet_auth = ["root", ""]
+        for key, val in args.iteritems():
+            if key is "cgi_user":
+                self.cgi_auth[0] = val
+            if key is "cgi_password":
+                self.cgi_auth[1] = val
+            if key is "telnet_user":
+                self.telnet_auth[0] = val
+            if key is "telnet_password":
+                self.telnet_auth[1] = val
 
-    def end_single_bitrate_test(self):
-        self.end_loop = 1
+        self.telnet = TelShell(self.host, *self.telnet_auth)
+        self.saber = SaberManager(rtspurl)
+        self.cgi = CgiManager(self.host, *self.cgi_auth)
+
+    def parse_url(self, url):
+        if not url.startwiths("rtsp://"):
+            raise Exception("Err, incorrect rtspurl")
+        tail = url[len("rtsp://"):]
+        host, tail = tail.split(':')
+        if tail.find("/") > 0:
+            port, profile = tail.split('/')
+        else:
+            profile = "profile1"
+        port = int(port)
+        return (host, port, profile)
+
+    def __del__(self):
+        del self.telnet
+
+    def run_test(self, parser_list):
+        pass
 
 
-class logParser(object):
+class BitrateTester(Tester):
+    def run_test(self, parser_list):
+        # this is a parsers responsibity chain mode
+        bitrates = map(lambda x: 1024 * 1024 * x, [2, 4, 8])
+
+        for bitrate in bitrates:
+            self.cgi.set_bitrate(bitrate)
+
+            for clients_num in xrange(1, 16):
+                thread = self.saber.run_nclients_nsecs(clients_num, 30)
+                toplog = self.telnet.cmd("top -b -n 3")
+                timeout = 30
+
+                while timeout > 0:
+                    time.sleep(10)
+                    timeout -= 10
+                    if thread.poll() != None:
+                        break
+
+                if thread.poll() != None and thread.poll() == 0:
+                    saberlog = thread.stdout.read()
+                else:
+                    raise Exception("Err, saber dead may oom!")
+
+                overflow_log = self.telnet.cmd("cat /sys/devices/platform/ocp/18040000.rts_soc_camera/streaminfo")
+
+                logs = {"saber": saberlog,
+                       "overflow": overflow_log,
+                       "top": toplog}
+
+                if parser_list:
+                    res = {"bitrate": bitrate, "clients": clients_num}
+                    for p in parser_list:
+                        res.update(p.parse(logs))
+
+                    yield res
+                    if res["fps_ave"] < 23 or res["idle"] < 5:
+                        break
+                else:
+                    yield logs
+
+
+class LogParser(object):
     def __init__(self):
         if self.match_set:
             for k, v in self.match_set.iteritems():
                 self.match_set[k] = re.compile(v, re.M)
-            self.match_result = {}
 
-    def parse(self, log):
-        result = ""
-        self.match_result.clear()
+    def parse(self, logs):
+        """
+        parse will parse the log, which has key of its category.
+
+        Return: the result as dict.
+        """
+        if not logs.has_key(self.category)
+            return
+        else:
+            log = logs[self.category]
+        res = {}
         for k, v in self.match_set.iteritems():
-            match = None
-            if v:
-                match = v.search(log)
-            if result:
-                result = result + '\t'
+            match = v.search(log)
             if match and match.groups():
-                result = result + match.group(1)
-                self.match_result[k] = match.group(1)
+                res[k] = match.groups(1)
             else:
                 raise Exception("parse err key <{}>, log: ----\n{}\n----\n".format(k, log))
-        return result
-
-    def titles(self):
-        if self.match_set:
-            return self.match_set.keys()
-        else:
-            return None
-
-    def __getitem__(self, x):
-        if self.match_result.has_key(x):
-            return self.match_result[x]
-        else:
-            return None
+        del log[self.category]
+        return res
 
 
-class rtspParser(logParser):
+class RtspParser(LogParser):
     def __init__(self):
+        self.category = "saber"
         self.match_set = {
             "kbps_ave": r"kbps_ave\s+(\d+\.\d+)",
             "fps_ave": r"fps_ave\s+(\d+\.\d+)",
             "jitter": r"jitter\(1/90000\)\s+(\d+)"
         }
-        logParser.__init__(self)
+        LogParser.__init__(self)
 
-class testParser(logParser):
+class OverflowParser(LogParser):
     def __init__(self):
-        self.match_set = {
-            "CPU": r"CPU usage: (\d+\.\d+)% user",
-            "Process": r"Processes: (\d+) total"
-        }
-        logParser.__init__(self)
-
-class overflowParser(logParser):
-    def __init__(self):
+        self.category = "overflow"
         self.match_set = {
             "overflow_stream0": r"^0\s+\d+\s+\d+\s+(\d+)",
             "overflow_stream1": r"^1\s+\d+\s+\d+\s+(\d+)",
-            #"overflow_stream2": r"^2\s+\d+\s+\d+\s+\d+\s+\d+\s+\[\d+\]:\d+\s+\[\d+\]:\d+$",
         }
-        logParser.__init__(self)
+        LogParser.__init__(self)
 
 
-class topParser(logParser):
+class TopParserV3(LogParser):
     def __init__(self):
-        self.match_set = {
-         "used": r"(\d+)K used",
-         "free": r"(\d+)K free",
-         "idle": r"(\d+\.\d)*% idle",
-         "peacock_profile1": r"(\d+\.\d+) peacock\s+-p\s+profile1",
-         "peacock_profile2": r"(\d+\.\d+) peacock\s+-p\s+profile2",
-         "lark":  r"(\d+\.\d+) lark",
-         "rtspd": r"(\d+\.\d+) rtspd"}
-        logParser.__init__(self)
-
-    def parse(self, log):
-        # skip 2 top outputs, because of top -b -n3
-        pos = 0
-        for i in range(3):
-            mo = re.search("Mem:", log[pos:])
-            if mo:
-                pos += mo.end()
-            else:
-                raise Exception("parsing err")
-        pos -= len("Mem:")
-        return super(topParserV3, self).parse(log[pos:])
-
-
-
-class topParserV3(logParser):
-    def __init__(self):
+        self.category = "top"
         self.match_set = {
          "used": r"(\d+)K used",
          "free": r"(\d+)K free",
@@ -291,22 +275,28 @@ class topParserV3(logParser):
          "peacock_profile2": r"(\d+)% peacock\s+-p\s+profile2",
          "lark":  r"(\d+)% lark",
          "rtspd": r"(\d+)% rtspd"}
-        logParser.__init__(self)
+        LogParser.__init__(self)
 
-    def parse(self, log):
+    def parse(self, logs):
         # skip 2 top outputs, because of top -b -n3
+        if not logs.has_key(self.category)
+            return
+        log = logs[self.category]
+
         pos = 0
         for i in range(3):
-            mo = re.search("Mem:", log[pos:])
-            if mo:
-                pos += mo.end()
+            pos = log.find("Mem:", pos)
+            if pos >= 0:
+                pos = pos + len("Mem:")
             else:
                 raise Exception("parsing err")
         pos -= len("Mem:")
-        return super(topParserV3, self).parse(log[pos:])
+        logs[self.category] = log[pos:]
+        return super(topParserV3, self).parse(logs)
 
-class topParserV31(topParserV3):
+class TopParserV31(topParserV3):
     def __init__(self):
+        self.category = "top"
         self.match_set = {
          "used": r"(\d+)K used",
          "free": r"(\d+)K free",
@@ -314,7 +304,7 @@ class topParserV31(topParserV3):
          "peacock_profile1": r"(\d+)% peacock",
          "lark":  r"(\d+)% lark",
          "rtspd": r"(\d+)% rtspd"}
-        logParser.__init__(self)
+        LogParser.__init__(self)
 
 
 
@@ -341,7 +331,7 @@ plot options:
 tel options:
     -c specify cmd
 note: this tool need saber in executable path
-""".format(app_name)
+""".format(sys.argv[0])
     exit(1)
 
 def file_plot_label_bitrate(filename, label, bitrate):
@@ -350,43 +340,29 @@ def file_plot_label_bitrate(filename, label, bitrate):
         if not label in titles:
             raise Exception("file %s does not have label %s"%(filename, label))
         ilabel = titles.index(label)
+        ibitrate = titles.index("bitrate")
 
         array = []
-        pattern = re.compile(r"\[(\d+),\s*(\d+)\]")
         for l in fid.readlines():
-            mo = pattern.match(l)
-            if not mo:
-                raise Exception("line format err %s"%(l))
-            ibitrate = int(mo.group(1))
             #iclients = int(mo.group(2))
-            if bitrate != ibitrate:
+            lt = l.split('\t')
+            if int(lt[ibitrate]) != bitrate:
                 continue
-            ret = float(l[mo.end() :].rstrip('\n').split('\t')[ilabel])
+            ret = float(lt[ilabel])
             array.append(ret)
         pt.plot(range(1, len(array) + 1), array, '.-', label = "%s_%d"%(filename, bitrate))
 
 
-app_name=""
 if __name__ == "__main__":
-    import sys
     import getopt
 
-    app_name = sys.argv[0]
     if len(sys.argv) < 2:
         print "too few argments"
         usage()
 
-    if sys.argv[1] == 'test':
-        mode = 'test'
-    elif sys.argv[1] == 'plot':
-        mode = 'plot'
-    elif sys.argv[1] == "parse":
-        mode = 'parse'
-    elif sys.argv[1] == "tel":
-        mode = "tel"
-    else:
+    mode = sys.argv[1]
+    if not mode in ["test", "plot", "parse", "tel"]:
         usage()
-
 
     try:
         opts, args = getopt.getopt(sys.argv[2:], "hno:l:b:c:")
@@ -395,8 +371,9 @@ if __name__ == "__main__":
         usage()
 
     outfile = None
-    bitrate = 0
-    label = ''
+    label = "idle:free:fps_ave:kbps_ave"
+    bitrate = None
+    cmd = ""
     bparse = True
     for o, v in opts:
         if o == "-h":
@@ -412,67 +389,51 @@ if __name__ == "__main__":
         if o == '-n':
             bparse = False
 
+
     if mode == 'test':
-        try:
-            host = args[0]
-            hostname = ''
-            port = ''
-            if ':' in host:
-                hostname, port = host.split(':')
-            else:
-                hostname = host
-            if port:
-                tester = nClientsBitrateTest(host, port)
-            else:
-                tester = nClientsBitrateTest(host)
+        host = args[0]
+        rtspurl = "rtsp://{}:43794/profile1".format(host)
 
-            tp = topParserV31()
-            rp = rtspParser()
-            op = overflowParser()
-            title = reduce(lambda x, y: x+'\t'+y, tp.titles() + rp.titles() + op.titles())
-            print title
-            if outfile:
-                print >> outfile, title
-            for rtsplog, toplog, oplog in tester.run():
-                tplog_parsed = tp.parse(toplog)
-                rplog_parsed = rp.parse(rtsplog)
-                oplog_parsed = op.parse(oplog)
-                if bparse:
-                    log = (str([tester.m_bitrate, tester.m_testcount])
-                            + tplog_parsed + '\t' + rplog_parsed + "\t" + oplog_parsed)
-                else:
-                    log = toplog + '\n' + rtsplog
-                print log
+        parsers = []
+        parsers.append(TopParserV31())
+        parsers.append(RtspParser())
+        parsers.append(OverflowParser())
+
+        tester = BitrateTester(rtspurl)
+        keys = []
+        for res in tester.run_test(parsers):
+            if not keys:
+                keys = res.keys()
+                print keys
                 if outfile:
-                    print >> outfile, log
+                    print >> outfile, keys
+            res_str = reduce(lambda x, y: str(x)+'\t'+str(y)，keys)
 
-                if int(tp["idle"]) < 5 or float(rp["fps_ave"]) < 23:
-                    print "reach max ability, single test break"
-                    tester.end_single_bitrate_test()
-        finally:
+            print res_str
             if outfile:
-                outfile.close()
-            import os
-            os.system("notify-send done " + host)
+                print >> outfile, res_str
+
+        if outfile:
+            outfile.close()
+
+        import os
+        os.system("notify-send done " + host)
 
     elif mode == "parse":
-        op = overflowParser()
-        sh = virtualShell(args[0], "root")
-        oplog = sh.cmd("cat /sys/devices/platform/ocp/18040000.rts_soc_camera/streaminfo")[-1]
-        print op.titles()
-        print op.parse(oplog)
+        op = OverflowParser()
+        sh = TelShell(args[0], "root")
+        oplog = sh.cmd("cat /sys/devices/platform/ocp/18040000.rts_soc_camera/streaminfo")
+        print op.parse({"overflow": oplog})
 
     elif mode == "plot":
         if len(args) == 0:
             print "missing a argment"
             usage()
-        if not label:
-            label = ["idle", "free", "fps_ave", "kbps_ave"]
+
+        if label.find(':') > 0:
+            label = label.split(':')
         else:
-            if label.find(':') > 0:
-                label = label.split(':')
-            else:
-                label = [label]
+            label = [label]
 
         if not bitrate:
             bitrate = map(lambda x:1024*1024*x, [2, 4, 8])
@@ -507,8 +468,8 @@ if __name__ == "__main__":
                 plot_label(_l, args, bitrate)
             pt.show()
     else:
-        sh = virtualShell(args[0], "root")
-        print sh.cmd(cmd)[-1]
-
-
-    #os.system("notify-send done " + host)
+        if not cmd:
+            print "Need a cmd"
+            exit(-1)
+        sh = TelShell(args[0], "root")
+        print sh.cmd(cmd)
